@@ -30,10 +30,11 @@ func Redis(host string,port int,password string,db int) (*Client,error) {
 		Port:port,
 		Db:db,
 		Password:password,
-		Pool:&RedisPool{},
+		Sock:nil,
 	}
 	client := &Client{
 		Connection:conn,
+		Pool : &RedisPool{},
 	}
 
 	return client,nil
@@ -44,10 +45,42 @@ type Client struct {
 	//I create it seperately,just because I want to add some logical code for client.Connection implement basci logic method.
 	//as for client,it's method looks like the basic redis-cli.
 	//add some field for client api ,which is used by pubic
+	Pool ConnectionPool
 	Connection
 }
 
-func (client *Client) Exist(key string) (bool,error) {
+func(client *Client) DisConnect() {
+		err := client.Pool.ClosePoolConn()
+		if err != nil {
+			fmt.Println("close err",err)
+		}
+		fmt.Println("the pool is closed successfully")
+}
+
+func (client *Client) send_cmd(cmd string,args...string) (interface{},error) {
+	c,err := client.Pool.GetConn()
+	if err != nil {
+		fmt.Println(err)
+		c,err = client.Connect()
+		if err != nil {
+			return nil,err
+		}
+		fmt.Println("create one new connection")
+	} else {
+		fmt.Println("use existed connection")
+	}
+	client.Sock = c
+	data,err := client.execute_cmd(cmd,args...)
+	err = client.Pool.PutConn(c)
+	if err == nil {
+		fmt.Println("put new con into chan successfully")
+	} else {
+		fmt.Println("put new con into chan failure ")
+	}
+	return data,err
+}
+
+func (client *Client) Exists(key string) (bool,error) {
 	reply,err := client.send_cmd("EXISTS",key)
 	if err != nil {
 		return false,err

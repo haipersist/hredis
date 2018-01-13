@@ -18,7 +18,7 @@ type Connection struct {
 	Port           int
 	Db             int
 	Password       string
-	Pool           ConnectionPool
+	Sock           net.Conn
 }
 
 type ConnectionPool interface {
@@ -38,62 +38,6 @@ const MAXCONNUM = 4
 var exception ReplyError
 
 
-func (r *RedisPool) GetConn() (net.Conn,error) {
-	// If the pool channel has created con,it return one,or else return nil.
-	//the pool should keep full value,avoid it is blocked.
-	//when new conn request comes before the first conn push back,and the chan has no value,it will be blocked until other conn
-	//push back conn to the Pool
-	if r.pool == nil {
-		r.pool = make(chan net.Conn,MAXCONNUM)
-		for i:=0;i<MAXCONNUM;i++ {
-			r.pool <- nil
-		}
-	}
-	c := <- r.pool
-	if c == nil {
-		return nil,RedisError("No created connection")
-	}
-	fmt.Println("I'm in Pool")
-	return c,nil
-}
-
-func(r *RedisPool) ClosePoolConn() []error {
-	e := make([]error,len(r.pool))
-	sum := 1
-	for c := range r.pool {
-		fmt.Println("c in pool",c)
-		if c != nil {
-			err:= c.Close()
-			if err != nil {
-				fmt.Println(err)
-				e = append(e,err)
-			} else {
-			 fmt.Println("the con is closed")
-			}
-		}
-		if sum==len(r.pool) {
-		   close(r.pool)
-		   break
-		
-		} else {
-		sum++
-		}
-	}
-	fmt.Println("after for in chan",e)
-	return e
-}
-
-func (r *RedisPool) PutConn(conn net.Conn) error{
-	if len(r.pool) < MAXCONNUM {
-		r.pool <- conn
-		return nil
-	}
-	return RedisError("the Pool is Full,sorry")
-}
-
-func (r *RedisPool) UsingConn() []Connection {
-	return []Connection{}
-}
 
 /*
 Connection methods
@@ -113,7 +57,6 @@ func(conn *Connection) GetAddr() string {
 func (conn *Connection) Connect() (net.Conn,error) {
 	tcpaddr := conn.GetAddr()
 	c,err := net.Dial("tcp",tcpaddr)
-	fmt.Println(c,err)
 	if err != nil {
 		e := ConnectionError("Connection")
 		err = e
@@ -121,34 +64,29 @@ func (conn *Connection) Connect() (net.Conn,error) {
 		return nil,err
 	} else {
 		fmt.Println("TCP Connection Created Successfully!")
-		//err = conn.OnConnect()
-		//conn.Pool.PutConn(c)
+		conn.Sock = c
+		err = conn.OnConnect()
 		return c,err
 	}
-
 }
 
 func (conn *Connection) OnConnect() error {
 	if conn.Password != "" {
-		fmt.Println(conn.Password)
-		data,err := conn.send_cmd("AUTH",conn.Password)
+		data,err := conn.execute_cmd("AUTH",conn.Password)
 		if err != nil {
 			fmt.Println(err)
 			return err
 		}
-		fmt.Println(data)
 		if data != "OK" {
 			fmt.Println(data,"auth")
 			ar := AuthenticationError("authen fail")
 			fmt.Println(ar,err)
-			return ar
+			panic("sorry,the authentication is wrong,may be it's no need password,or password is wrong")
 		}
-	}else {
-		fmt.Println("password is not set. ")
 	}
 	if conn.Db != 0 {
 			fmt.Println(conn.Db)
-			if data,err := conn.send_cmd("SELECT",strconv.Itoa(conn.Db));data !="OK" {
+			if data,err := conn.execute_cmd("SELECT",strconv.Itoa(conn.Db));data !="OK" {
 				return RedisError("Redis Error")
 				fmt.Println(err)
 			}
@@ -185,26 +123,12 @@ func (conn *Connection) pack_send(c net.Conn,cmd string,args...string) (interfac
 	return result,err
 }
 
-func (conn *Connection) DisConnect() {
-	err := conn.Pool.ClosePoolConn()
-	fmt.Println("close err",err)
-}
 
-func (conn *Connection) send_cmd(cmd string,args...string) (interface{},error) {
-	fmt.Println("first: connect")
-	c,err := conn.Pool.GetConn()
-	if err != nil {
-		fmt.Println(err)
-		c,err = conn.Connect()
-		fmt.Println("new",c)
-		fmt.Println("create one new connection")
-	} else {
-		fmt.Println("use existed connection")
-	}
-	fmt.Println("connect success before send cmd")
-	err = conn.Pool.PutConn(c)
-	if err == nil {
-		fmt.Println("put new con into chan successfully")
+
+func (conn *Connection) execute_cmd(cmd string,args...string) (interface{},error) {
+	c := conn.Sock
+	if c == nil {
+		panic("the conn is not connected to Redis server")
 	}
 	data,err := conn.pack_send(c,cmd,args...)
 	return data,err
@@ -310,3 +234,61 @@ func(conn *Connection) read_bulk(reader *bufio.Reader, head string) ([]byte, err
 
 
 
+
+func (r *RedisPool) GetConn() (net.Conn,error) {
+	// If the pool channel has created con,it return one,or else return nil.
+	//the pool should keep full value,avoid it is blocked.
+	//when new conn request comes before the first conn push back,and the chan has no value,it will be blocked until other conn
+	//push back conn to the Pool
+	if r.pool == nil {
+		r.pool = make(chan net.Conn,MAXCONNUM)
+		for i:=0;i<MAXCONNUM;i++ {
+			r.pool <- nil
+		}
+	}
+	c := <- r.pool
+	if c == nil {
+		return nil,RedisError("No created connection")
+	}
+	return c,nil
+}
+
+func(r *RedisPool) ClosePoolConn() []error {
+	if r.pool == nil {
+	   var errors []error
+	   return  append(errors,nil)
+	}
+	e := make([]error,len(r.pool))
+	sum,length := 1,len(r.pool)
+	for c := range r.pool {
+		if c != nil {
+			err:= c.Close()
+			if err != nil {
+				fmt.Println(err)
+				e = append(e,err)
+			} else {
+				fmt.Println("the con is closed")
+			}
+		}
+		if sum==length {
+			close(r.pool)
+			break
+
+		} else {
+			sum++
+		}
+	}
+	return e
+}
+
+func (r *RedisPool) PutConn(conn net.Conn) error{
+	if len(r.pool) < MAXCONNUM {
+		r.pool <- conn
+		return nil
+	}
+	return RedisError("the Pool is Full,sorry")
+}
+
+func (r *RedisPool) UsingConn() []Connection {
+	return []Connection{}
+}

@@ -7,7 +7,7 @@ import (
 type RedisError string
 
 func (r RedisError) Error() string {
-	return "Redis Error" + string(r)
+	return "Redis Error: " + string(r)
 }
 
 type AuthenticationError string
