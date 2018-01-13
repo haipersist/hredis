@@ -35,6 +35,8 @@ type RedisPool struct {
 //set the size of the connecion pool is 4
 const MAXCONNUM = 4
 
+var exception ReplyError
+
 
 func (r *RedisPool) GetConn() (net.Conn,error) {
 	// If the pool channel has created con,it return one,or else return nil.
@@ -129,7 +131,7 @@ func (conn *Connection) Connect() (net.Conn,error) {
 func (conn *Connection) OnConnect() error {
 	if conn.Password != "" {
 		fmt.Println(conn.Password)
-		data,err := conn.SendCmd("AUTH",conn.Password)
+		data,err := conn.send_cmd("AUTH",conn.Password)
 		if err != nil {
 			fmt.Println(err)
 			return err
@@ -146,7 +148,7 @@ func (conn *Connection) OnConnect() error {
 	}
 	if conn.Db != 0 {
 			fmt.Println(conn.Db)
-			if data,err := conn.SendCmd("SELECT",strconv.Itoa(conn.Db));data !="OK" {
+			if data,err := conn.send_cmd("SELECT",strconv.Itoa(conn.Db));data !="OK" {
 				return RedisError("Redis Error")
 				fmt.Println(err)
 			}
@@ -154,25 +156,31 @@ func (conn *Connection) OnConnect() error {
 	return nil
 }
 
-func (conn *Connection) rawSend(c net.Conn,cmd string,args...string) (interface{}, error) {
-        str := fmt.Sprintf("*%d\r\n$%d\r\n%s\r\n", len(args)+1, len(cmd), cmd)
-	cmdbuf := bytes.NewBufferString(str)
+
+// pack the cmd and args into the format which is according to Redis protocal
+func (conn *Connection) pack_send(c net.Conn,cmd string,args...string) (interface{}, error) {
+	//the cmd_str includes:1.the num of cmd and args,args is one array, 2.the length of cmd string,3.cmd
+	cmd_str := fmt.Sprintf("*%d\r\n$%d\r\n%s\r\n", len(args)+1, len(cmd), cmd)
+	cmd_buffer := bytes.NewBufferString(cmd_str)
         //fmt.Println(str,"str")
-	for _,item := range args {
-                fmt.Println(fmt.Sprintf("$%d\r\n%s\r\n", len(item), item))
-		cmdbuf.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(item), item))
+	for _,arg := range args {
+		//as for each of args,should set its length and string itself
+		fmt.Println(fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg))
+		cmd_buffer.WriteString(fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg))
 	}
-        fmt.Println(cmdbuf)
-	cmdbytes := cmdbuf.Bytes()
-	fmt.Println("cmdbytes",cmdbytes,string(cmdbytes))
-        fmt.Println(c)
+	fmt.Println(cmd_buffer)
+	//should convert string into bytes before sending to socket.
+	cmdbytes := cmd_buffer.Bytes()
+	//write bytes into connect socket
 	_,err := c.Write(cmdbytes)
 	if err != nil {
-		fmt.Println("error in write",err)
-		return nil,err
+		//I think,as long as we add defer conn.Disconnect() in main func,defer will continue before exit.
+		panic(err)
+		//return nil,err
 	}
+	//read response from redis server
 	reader := bufio.NewReader(c)
-	result,err := conn.ReadResponse(reader)
+	result,err := conn.read_response(reader)
 	fmt.Println("get from redis server:",result,err)
 	return result,err
 }
@@ -182,7 +190,7 @@ func (conn *Connection) DisConnect() {
 	fmt.Println("close err",err)
 }
 
-func (conn *Connection) SendCmd(cmd string,args...string) (interface{},error) {
+func (conn *Connection) send_cmd(cmd string,args...string) (interface{},error) {
 	fmt.Println("first: connect")
 	c,err := conn.Pool.GetConn()
 	if err != nil {
@@ -198,74 +206,77 @@ func (conn *Connection) SendCmd(cmd string,args...string) (interface{},error) {
 	if err == nil {
 		fmt.Println("put new con into chan successfully")
 	}
-	data,err := conn.rawSend(c,cmd,args...)
+	data,err := conn.pack_send(c,cmd,args...)
 	return data,err
 }
 
 
-func (conn *Connection) ReadResponse(reader *bufio.Reader) (interface{}, error) {
+func (conn *Connection) read_response(reader *bufio.Reader) (interface{}, error) {
 	var line string
 	var err error
-	var sum = 0
-	//read until the first non-whitespace line
-	for {
-		line, err = reader.ReadString('\n')
-		sum++
-		fmt.Println(line,sum)
-		
-		if len(line) == 0 || err != nil {
-			return nil, err
+	//read until the first non-whitespace line,should use '',it is byte type
+	line,err = reader.ReadString('\n')
+	if len(line) == 0 || err != nil {
+		panic(err)
+	}
+	line = strings.TrimSpace(line)
+	switch head:=line[0];head {
+	//it is byte format
+	case '+' :
+		return line[1:],nil
+	case '-':
+		exception = ReplyError{"ERR":RedisError("ERRError"),
+			"EXECABORT": RedisError("ExecAbortError"),
+			"LOADING": RedisError("BusyLoadingError"),
+			"NOSCRIPT": RedisError("NoScriptError"),
+			"READONLY": RedisError("READONLY"),
 		}
-		line = strings.TrimSpace(line)
-		if len(line) > 0 {
-			break
-		}
-	}
-
-	if line[0] == '+' {
-		return strings.TrimSpace(line[1:]), nil
-	}
-
-	if strings.HasPrefix(line, "-ERR ") {
-		errmesg := strings.TrimSpace(line[5:])
-		return nil, RedisError(errmesg)
-	}
-
-	if line[0] == ':' {
-		n, err := strconv.ParseInt(strings.TrimSpace(line[1:]), 10, 64)
+		return nil,exception.ParseError(line)
+	case ':':
+		//add for :,the func return int type
+		num,err := strconv.ParseInt(line[1:],10,64)
 		if err != nil {
-			return nil, RedisError("Int reply is not a number")
+			return nil,RedisError("the reply is not inerger as our expection")
 		}
-		fmt.Println(":,n",n)
-		return n, nil
-	}
-
-	if line[0] == '*' {
-		size, err := strconv.Atoi(strings.TrimSpace(line[1:]))
+		return num,nil
+	case '$':
+		//return byte type and nil
+		reply,err := conn.read_bulk(reader,line)
 		if err != nil {
-			return nil, RedisError("MultiBulk reply expected a number")
+			return nil,err
 		}
-		if size <= 0 {
-			return make([][]byte, 0), nil
+		return reply,nil
+	case '*':
+		num,err := strconv.Atoi(line[1:])
+		if err != nil {
+			return nil,RedisError("the reply is not inerger as our expection")
 		}
-		res := make([][]byte, size)
-		for i := 0; i < size; i++ {
-			res[i], err = readBulk(reader, "")
-			fmt.Println("*",res[i])
+		if num == 0 {
+			return nil,RedisError("the key you want to query does not exists.")
+		}
+		if num == -1 {
+			//different from [] and error
+			return nil,RedisError("may me timeoutfor blop.")
+		}
+		reply := make([][]byte,num)
+		for i:=0;i<num;i++ {
+			item,err := conn.read_bulk(reader,"")
 			if err != nil {
-				return nil, err
+				return nil,err
 			}
-			// dont read end of line as might not have been bulk
+			reply[i] = item
 		}
-		return res, nil
+		return reply,nil
+	default:
+		fmt.Println("reply head:",head)
+		panic("the redis response is not invalid! it not in -,+,:,$,*")
 	}
-	fmt.Println(line,"line before return")
-	return readBulk(reader, line)
+	return nil,err
 }
 
-func readBulk(reader *bufio.Reader, head string) ([]byte, error) {
+func(conn *Connection) read_bulk(reader *bufio.Reader, head string) ([]byte, error) {
 	var err error
-	var data []byte
+	var result []byte
 
 	if head == "" {
 		head, err = reader.ReadString('\n')
@@ -273,30 +284,28 @@ func readBulk(reader *bufio.Reader, head string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	switch head[0] {
-	case ':':
-		data = []byte(strings.TrimSpace(head[1:]))
-
-	case '$':
+	if head[0] == '$' {
+		//In head,the next should be the length of reply string
 		size, err := strconv.Atoi(strings.TrimSpace(head[1:]))
 		if err != nil {
 			return nil, err
 		}
 		if size == -1 {
-			return nil, err
+			return nil, RedisError("the key you get dose not exists")
 		}
+
 		lr := io.LimitReader(reader, int64(size))
-		data, err = ioutil.ReadAll(lr)
-		fmt.Println("data:",string(data))
+		result, err = ioutil.ReadAll(lr)
 		if err == nil {
 			// read end of line
 			_, err = reader.ReadString('\n')
 		}
-	default:
-		return nil, RedisError("Expecting Prefix '$' or ':'")
+		return result,err
+	} else if head[0] == ':'{
+		return []byte(strings.TrimSpace(head[1:])),nil
 	}
-	fmt.Println("before return,data",string(data))
-	return data,err
+	return nil,RedisError("the muliple reply is invalid")
+
 }
 
 

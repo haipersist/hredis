@@ -14,8 +14,10 @@ CopyRight(c)  Haibo Wang 2018
  */
 package hredis
 
-
-import "fmt"
+import (
+	"strconv"
+	"fmt"
+)
 
 
 //The function is used to create Connection,it is one interface between conncetion and public.
@@ -45,16 +47,68 @@ type Client struct {
 	Connection
 }
 
-
-
-func (client *Client) ExecCmd() {
-	data,err := client.SendCmd("GET","haibo")
-	fmt.Println(data,err)
+func (client *Client) Exist(key string) (bool,error) {
+	reply,err := client.send_cmd("EXISTS",key)
+	if err != nil {
+		return false,err
+	}
+	if reply == 1{
+		return true,nil
+	}
+	return false,nil
 }
 
-func (client *Client) ParseResponse() {
 
+func (client *Client) Del(key string) (bool,error) {
+	reply,err := client.send_cmd("DEL",key)
+	if err != nil {
+		return false,err
+	}
+	if reply == 1{
+		return true,nil
+	}
+	return false,nil
 }
+
+func (client *Client) Get(key string) (string,error) {
+	data,err := client.send_cmd("GET",key)
+	return string(data.([]byte)),err
+}
+
+func (client *Client) Set(key string,value string) (string,error) {
+	reply,err := client.send_cmd("SET",key,value)
+	return reply.(string),err
+}
+
+func (client *Client) Incr(key string) (int64,error) {
+	result,err := client.send_cmd("INCR",key)
+	if err != nil {
+		return 0,err
+	}
+	return result.(int64),nil
+}
+
+func (client *Client) Lpush(key string,args...string)(int64,error) {
+	para := make([]string,len(args)+1)
+	para = append(para,key)
+	para = append(para,args...)
+	fmt.Println("lpush para",para)
+	reply,err := client.send_cmd("LPUSH",para...)
+	if err != nil {
+		return 0,err
+	}
+	return reply.(int64),nil
+}
+
+func (client *Client) Lrange(key string,start int,end int) ([][]byte,error) {
+	start_index,end_index := strconv.Itoa(start),strconv.Itoa(end)
+	result,err := client.send_cmd("LRANGE",key,start_index,end_index)
+	if err == nil {
+		return result.([][]byte),nil
+	}
+	return nil,err
+}
+
 
 func (client *Client) BgSave() {
 
