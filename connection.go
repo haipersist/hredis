@@ -95,12 +95,10 @@ func (conn *Connection) OnConnect() error {
 }
 
 
-// pack the cmd and args into the format which is according to Redis protocal
-func (conn *Connection) pack_send(c net.Conn,cmd string,args...string) (interface{}, error) {
-	//the cmd_str includes:1.the num of cmd and args,args is one array, 2.the length of cmd string,3.cmd
+func (conn *Connection) Convert2bytes(cmd string,args...string) []byte {
 	cmd_str := fmt.Sprintf("*%d\r\n$%d\r\n%s\r\n", len(args)+1, len(cmd), cmd)
 	cmd_buffer := bytes.NewBufferString(cmd_str)
-        //fmt.Println(str,"str")
+	//fmt.Println(str,"str")
 	for _,arg := range args {
 		//as for each of args,should set its length and string itself
 		fmt.Println(fmt.Sprintf("$%d\r\n%s\r\n", len(arg), arg))
@@ -109,6 +107,13 @@ func (conn *Connection) pack_send(c net.Conn,cmd string,args...string) (interfac
 	fmt.Println(cmd_buffer)
 	//should convert string into bytes before sending to socket.
 	cmdbytes := cmd_buffer.Bytes()
+	return cmdbytes
+}
+
+// pack the cmd and args into the format which is according to Redis protocal
+func (conn *Connection) pack_send(c net.Conn,cmd string,args...string) (interface{}, error) {
+	// should convert string into bytes before sending to socket.
+	cmdbytes := conn.Convert2bytes(cmd,args...)
 	//write bytes into connect socket
 	_,err := c.Write(cmdbytes)
 	if err != nil {
@@ -122,7 +127,6 @@ func (conn *Connection) pack_send(c net.Conn,cmd string,args...string) (interfac
 	fmt.Println("get from redis server:",result,err)
 	return result,err
 }
-
 
 
 func (conn *Connection) execute_cmd(cmd string,args...string) (interface{},error) {
@@ -158,6 +162,10 @@ func (conn *Connection) read_response(reader *bufio.Reader) (interface{}, error)
 		return nil,exception.ParseError(line)
 	case ':':
 		//add for :,the func return int type
+		/*
+		return interger command:
+		SETNX、DEL、EXISTS、INCR、INCRBY、DECR、DECRBY、DBSIZE、LASTSAVE、RENAMENX、MOVE、LLEN、SADD、SREM、SISMEMBER、SCARD。
+		 */
 		num,err := strconv.ParseInt(line[1:],10,64)
 		if err != nil {
 			return nil,RedisError("the reply is not inerger as our expection")
