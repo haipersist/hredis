@@ -45,38 +45,56 @@ type Client struct {
 	//I create it seperately,just because I want to add some logical code for client.Connection implement basci logic method.
 	//as for client,it's method looks like the basic redis-cli.
 	//add some field for client api ,which is used by pubic
-	Pool ConnectionPool
+	Pool          ConnectionPool
 	Connection
+	Transaction   bool
 }
 
 func(client *Client) DisConnect() {
-		err := client.Pool.ClosePoolConn()
-		if err != nil {
-			fmt.Println("close err",err)
+		if !client.Transaction {
+			err := client.Pool.ClosePoolConn()
+			if err != nil {
+				fmt.Println("close err",err)
+			}
+			fmt.Println("the pool is closed successfully")
+		} else {
+			if client.Sock != nil {
+				client.Sock.Close()
+			}
 		}
-		fmt.Println("the pool is closed successfully")
 }
 
 func (client *Client) send_cmd(cmd string,args...string) (interface{},error) {
-	c,err := client.Pool.GetConn()
-	if err != nil {
-		fmt.Println(err)
-		c,err = client.Connect()
+
+	if ! client.Transaction {
+		c,err := client.Pool.GetConn()
 		if err != nil {
-			return nil,err
+			fmt.Println(err)
+			c,err = client.Connect()
+			if err != nil {
+				return nil,err
+			}
+			fmt.Println("create one new connection")
+		} else {
+			fmt.Println("use existed connection")
 		}
-		fmt.Println("create one new connection")
+		client.Sock = c
+		err = client.Pool.PutConn(c)
+		if err == nil {
+			fmt.Println("put new con into chan successfully")
+		} else {
+			fmt.Println("put new con into chan failure ")
+		}
 	} else {
-		fmt.Println("use existed connection")
+		if client.Sock == nil {
+			c,err := client.Connect()
+			client.Sock = c
+			if err != nil {
+				return nil,err
+			}
+		}
 	}
-	client.Sock = c
 	data,err := client.execute_cmd(cmd,args...)
-	err = client.Pool.PutConn(c)
-	if err == nil {
-		fmt.Println("put new con into chan successfully")
-	} else {
-		fmt.Println("put new con into chan failure ")
-	}
 	return data,err
 }
 
@@ -121,6 +139,14 @@ func (client *Client) Incr(key string) (int64,error) {
 	return result.(int64),nil
 }
 
+func (client *Client) Llen(key string) (int64,error) {
+	length,err := client.send_cmd("LLEN",key)
+	if err != nil {
+		return 0,err
+	}
+	return length.(int64),nil
+}
+
 func (client *Client) Lpush(key string,args...string)(int64,error) {
 	para := make([]string,len(args)+1)
 	para = append(para,key)
@@ -142,10 +168,69 @@ func (client *Client) Lrange(key string,start int,end int) ([][]byte,error) {
 	return nil,err
 }
 
-
-func (client *Client) BgSave() {
-
+func (client *Client) Hset(key string,field string,value string)  (int64,error) {
+	reply,err := client.send_cmd("HSET",field,value)
+	if err != nil {
+		return 0,err
+	}
+	// if the reply interger is 1,the set operation is successful.if return 0,it is overwritten
+	return reply.(int64),nil
 }
+
+func (client *Client) Hget(key string,field string) (string,error) {
+	reply,err := client.send_cmd("HGET",field)
+	if err != nil {
+		return "",err
+	}
+	return string(reply.([]byte)),nil
+}
+
+func (client *Client) Hdel(key string,field string) (bool,error) {
+	reply,err := client.send_cmd("HDEL",key,field)
+	if err != nil {
+		return false,err
+	}
+	if reply == 1{
+		return true,nil
+	}
+	return false,nil
+}
+
+func (client *Client) Hexists(key string,field string) (bool,error) {
+	reply,err := client.send_cmd("HEXISTS",key,field)
+	if err != nil {
+		return false,err
+	}
+	if reply == 1{
+		return true,nil
+	}
+	return false,nil
+}
+
+func (client *Client) Multi() error {
+	_,err := client.send_cmd("MULTI")
+	return err
+}
+
+func (client *Client) Watch(key string) error {
+	_,err := client.send_cmd("WATCH",key)
+	return err
+}
+
+func (client *Client) Unwatch(key string) error {
+	_,err := client.send_cmd("UNWATCH",key)
+	return err
+}
+
+func (client *Client) Exec() ([][]byte,error) {
+	reply,err := client.send_cmd("EXEC")
+	if err != nil {
+		return nil,err
+	}
+	return reply.([][]byte),nil
+}
+
+
 
 /*
 Below,write all kinds of commands in Redis, according the format of Redis
